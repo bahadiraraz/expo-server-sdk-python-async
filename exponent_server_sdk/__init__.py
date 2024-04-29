@@ -1,12 +1,13 @@
 from collections import namedtuple
-import json
+import httpx
 import itertools
-import requests
+import json
 from urllib.parse import urljoin, urlencode
 
 
 class PushTicketError(Exception):
     """Base class for all push ticket errors"""
+
     def __init__(self, push_response):
         if push_response.message:
             self.message = push_response.message
@@ -42,7 +43,7 @@ class MessageRateExceededError(PushTicketError):
 
 
 class InvalidCredentialsError(PushTicketError):
-    """Raised when our push notification credentials for your standalone app 
+    """Raised when our push notification credentials for your standalone app
     are invalid (ex: you may have revoked them).
 
     Run expo build:ios -c to regenerate new push notification credentials for
@@ -67,6 +68,7 @@ class PushServerError(Exception):
       }
     ]}
     """
+
     def __init__(self, message, response, response_data=None, errors=None):
         self.message = message
         self.response = response
@@ -76,11 +78,11 @@ class PushServerError(Exception):
 
 
 class PushMessage(
-        namedtuple('PushMessage', [
-            'to', 'data', 'title', 'body', 'sound', 'ttl', 'expiration',
-            'priority', 'badge', 'category', 'display_in_foreground',
-            'channel_id', 'subtitle', 'mutable_content'
-        ])):
+    namedtuple('PushMessage', [
+        'to', 'data', 'title', 'body', 'sound', 'ttl', 'expiration',
+        'priority', 'badge', 'category', 'display_in_foreground',
+        'channel_id', 'subtitle', 'mutable_content'
+    ])):
     """An object that describes a push notification request.
 
     You can override this class to provide your own custom validation before
@@ -113,16 +115,19 @@ class PushMessage(
                 this notification on Android devices.
             display_in_foreground: Displays the notification when the app is
                 foregrounded. Defaults to `false`. No longer available?
-            subtitle: The subtitle to display in the notification below the 
+            subtitle: The subtitle to display in the notification below the
                 title (iOS only).
-            mutable_content: Specifies whether this notification can be 
+            mutable_content: Specifies whether this notification can be
                 intercepted by the client app. In Expo Go, defaults to true.
                 In standalone and bare apps, defaults to false. (iOS Only)
 
     """
+
     def get_payload(self):
         # Sanity check for invalid push token format.
-        if not PushClient.is_exponent_push_token(self.to):
+
+        # Use AsyncPushClient to check the token format
+        if not AsyncPushClient.is_exponent_push_token(self.to):
             raise ValueError('Invalid push token')
 
         # There is only one required field.
@@ -165,12 +170,12 @@ class PushMessage(
 # Allow optional arguments for PushMessages since everything but the `to` field
 # is optional. Unfortunately namedtuples don't allow for an easy way to create
 # a required argument at the constructor level right now.
-PushMessage.__new__.__defaults__ = (None, ) * len(PushMessage._fields)
+PushMessage.__new__.__defaults__ = (None,) * len(PushMessage._fields)
 
 
 class PushTicket(
-        namedtuple('PushTicket',
-                   ['push_message', 'status', 'message', 'details', 'id'])):
+    namedtuple('PushTicket',
+               ['push_message', 'status', 'message', 'details', 'id'])):
     """Wrapper class for a push notification response.
 
     A successful single push notification:
@@ -218,7 +223,7 @@ class PushTicket(
 
 
 class PushReceipt(
-        namedtuple('PushReceipt', ['id', 'status', 'message', 'details'])):
+    namedtuple('PushReceipt', ['id', 'status', 'message', 'details'])):
     """Wrapper class for a PushReceipt response. Similar to a PushResponse
 
     A successful single push notification:
@@ -268,252 +273,113 @@ class PushReceipt(
         raise PushTicketError(self)
 
 
-class PushClient(object):
-    """Exponent push client
-
-    See full API docs at https://docs.expo.io/versions/latest/guides/push-notifications.html#http2-api
-    """
+class AsyncPushClient:
     DEFAULT_HOST = "https://exp.host"
     DEFAULT_BASE_API_URL = "/--/api/v2"
     DEFAULT_MAX_MESSAGE_COUNT = 100
     DEFAULT_MAX_RECEIPT_COUNT = 1000
 
     def __init__(self, host=None, api_url=None, session=None, force_fcm_v1=None, **kwargs):
-        """Construct a new PushClient object.
-
-        Args:
-            host: The server protocol, hostname, and port.
-            api_url: The api url at the host.
-            session: Pass in your own requests.Session object if you prefer
-                to customize
-            force_fcm_v1: If True, send Android notifications via FCM V1, regardless
-                of whether a valid credential exists.
-        """
-        self.host = host
-        if not self.host:
-            self.host = PushClient.DEFAULT_HOST
-
-        self.api_url = api_url
-        if not self.api_url:
-            self.api_url = PushClient.DEFAULT_BASE_API_URL
-
+        self.host = host or AsyncPushClient.DEFAULT_HOST
+        self.api_url = api_url or AsyncPushClient.DEFAULT_BASE_API_URL
         self.force_fcm_v1 = force_fcm_v1
+        self.max_message_count = kwargs.get('max_message_count', AsyncPushClient.DEFAULT_MAX_MESSAGE_COUNT)
+        self.max_receipt_count = kwargs.get('max_receipt_count', AsyncPushClient.DEFAULT_MAX_RECEIPT_COUNT)
+        self.timeout = kwargs.get('timeout', 10)  # Default timeout of 10 seconds
 
-        self.max_message_count = kwargs[
-            'max_message_count'] if 'max_message_count' in kwargs else PushClient.DEFAULT_MAX_MESSAGE_COUNT
-        self.max_receipt_count = kwargs[
-            'max_receipt_count'] if 'max_receipt_count' in kwargs else PushClient.DEFAULT_MAX_RECEIPT_COUNT
-        self.timeout = kwargs['timeout'] if 'timeout' in kwargs else None
+        self.client = session or httpx.AsyncClient(
+            headers={
+                'Accept': 'application/json',
+                'Content-Type': 'application/json',
+            },
+            timeout=self.timeout
+        )
 
-        self.session = session
-        if not self.session:
-            self.session = requests.Session()
-            self.session.headers.update({
-                'accept': 'application/json',
-                'accept-encoding': 'gzip, deflate',
-                'content-type': 'application/json',
-            })
-
-    @classmethod
-    def is_exponent_push_token(cls, token):
-        """Returns `True` if the token is an Exponent push token"""
-        import six
-
-        return (isinstance(token, six.string_types)
-                and token.startswith('ExponentPushToken'))
-
-    def _publish_internal(self, push_messages):
-        """Send push notifications
-
-        The server will validate any type of syntax errors and the client will
-        raise the proper exceptions for the user to handle.
-
-        Each notification is of the form:
-        {
-          'to': 'ExponentPushToken[xxx]',
-          'body': 'This text gets display in the notification',
-          'badge': 1,
-          'data': {'any': 'json object'},
-        }
-
-        Args:
-            push_messages: An array of PushMessage objects.
-        """
-
+    async def _publish_internal(self, push_messages):
         url = urljoin(self.host, self.api_url + '/push/send')
         if self.force_fcm_v1 is not None:
             query_params = {'useFcmV1': 'true' if self.force_fcm_v1 else 'false'}
             url += '?' + urlencode(query_params)
 
-        response = self.session.post(
-            url,
-            data=json.dumps([pm.get_payload() for pm in push_messages]),
-            timeout=self.timeout)
-
-        # Let's validate the response format first.
         try:
-            response_data = response.json()
-        except ValueError:
-            # The response isn't json. First, let's attempt to raise a normal
-            # http error. If it's a 200, then we'll raise our own error.
+            response = await self.client.post(url, content=json.dumps([pm.get_payload() for pm in push_messages]))
             response.raise_for_status()
+            response_data = response.json()
 
-            raise PushServerError('Invalid server response', response)
+            if 'errors' in response_data:
+                raise PushServerError('Request failed', response, response_data=response_data,
+                                      errors=response_data['errors'])
 
-        # If there are errors with the entire request, raise an error now.
-        if 'errors' in response_data:
-            raise PushServerError('Request failed',
-                                  response,
-                                  response_data=response_data,
-                                  errors=response_data['errors'])
+            if 'data' not in response_data:
+                raise PushServerError('Invalid server response', response, response_data=response_data)
 
-        # We expect the response to have a 'data' field with the responses.
-        if 'data' not in response_data:
-            raise PushServerError('Invalid server response',
-                                  response,
-                                  response_data=response_data)
+            push_tickets = []
+            for i, push_ticket in enumerate(response_data['data']):
+                push_tickets.append(
+                    PushTicket(
+                        push_message=push_messages[i],
+                        status=push_ticket.get('status', PushTicket.ERROR_STATUS),
+                        message=push_ticket.get('message', ''),
+                        details=push_ticket.get('details', None),
+                        id=push_ticket.get('id', '')))
+            return push_tickets
+        except httpx.HTTPStatusError as e:
+            raise PushServerError('HTTP error', e.request, {'error': str(e)})
+        except httpx.RequestError as e:
+            raise PushServerError('Request failed', e.request)
 
-        # Use the requests library's built-in exceptions for any remaining 4xx
-        # and 5xx errors.
-        response.raise_for_status()
+    @staticmethod
+    def is_exponent_push_token(token):
+        return isinstance(token, str) and token.startswith('ExponentPushToken[')
 
-        # Sanity check the response
-        if len(push_messages) != len(response_data['data']):
-            raise PushServerError(
-                ('Mismatched response length. Expected %d %s but only '
-                 'received %d' %
-                 (len(push_messages), 'receipt' if len(push_messages) == 1 else
-                  'receipts', len(response_data['data']))),
-                response,
-                response_data=response_data)
-
-        # At this point, we know it's a 200 and the response format is correct.
-        # Now let's parse the responses(push_tickets) per push notification.
-        push_tickets = []
-        for i, push_ticket in enumerate(response_data['data']):
-            push_tickets.append(
-                PushTicket(
-                    push_message=push_messages[i],
-                    # If there is no status, assume error.
-                    status=push_ticket.get('status', PushTicket.ERROR_STATUS),
-                    message=push_ticket.get('message', ''),
-                    details=push_ticket.get('details', None),
-                    id=push_ticket.get('id', '')))
-
-        return push_tickets
-
-    def publish(self, push_message):
-        """Sends a single push notification
-
-        Args:
-            push_message: A single PushMessage object.
-
-        Returns:
-           A PushTicket object which contains the results.
-        """
-        return self.publish_multiple([push_message])[0]
-
-    def publish_multiple(self, push_messages):
-        """Sends multiple push notifications at once
-
-        Args:
-            push_messages: An array of PushMessage objects.
-
-        Returns:
-           An array of PushTicket objects which contains the results.
-        """
+    async def publish_multiple(self, push_messages):
         push_tickets = []
         for start in itertools.count(0, self.max_message_count):
-            chunk = list(
-                itertools.islice(push_messages, start,
-                                 start + self.max_message_count))
+            chunk = list(itertools.islice(push_messages, start, start + self.max_message_count))
             if not chunk:
                 break
-            push_tickets.extend(self._publish_internal(chunk))
+            push_tickets.extend(await self._publish_internal(chunk))
         return push_tickets
 
-    def check_receipts_multiple(self, push_tickets):
-        """
-        Check receipts in batches of 1000 as per expo docs
-        """
+    async def publish(self, push_message):
+        return (await self.publish_multiple([push_message]))[0]
+
+    async def check_receipts_multiple(self, push_tickets):
         receipts = []
         for start in itertools.count(0, self.max_receipt_count):
-            chunk = list(
-                itertools.islice(push_tickets, start,
-                                 start + self.max_receipt_count))
+            chunk = list(itertools.islice(push_tickets, start, start + self.max_receipt_count))
             if not chunk:
                 break
-            receipts.extend(self._check_receipts_internal(chunk))
+            receipts.extend(await self._check_receipts_internal(chunk))
         return receipts
 
-    def _check_receipts_internal(self, push_tickets):
-        """
-        Helper function for check_receipts_multiple
-        """
-        response = self.session.post(
+    async def _check_receipts_internal(self, push_tickets):
+        response = await self.client.post(
             self.host + self.api_url + '/push/getReceipts',
-            json={'ids': [push_ticket.id for push_ticket in push_tickets]},
-            timeout=self.timeout)
+            json={'ids': [push_ticket.id for push_ticket in push_tickets]})
+        return await self.validate_and_get_receipts(response)
 
-        receipts = self.validate_and_get_receipts(response)
-        return receipts
-
-    def check_receipts(self, push_tickets):
-        """  Checks the push receipts of the given push tickets """
-        # Delayed import because this file is immediately read on install, and
-        # the requests library may not be installed yet.
-        response = requests.post(
-            self.host + self.api_url + '/push/getReceipts',
-            data=json.dumps(
-                {'ids': [push_ticket.id for push_ticket in push_tickets]}),
-            headers={
-                'accept': 'application/json',
-                'accept-encoding': 'gzip, deflate',
-                'content-type': 'application/json',
-            },
-            timeout=self.timeout)
-        receipts = self.validate_and_get_receipts(response)
-        return receipts
-
-    def validate_and_get_receipts(self, response):
-        """
-        Validate and get receipts for requests
-        """
-        # Let's validate the response format first.
+    async def validate_and_get_receipts(self, response):
         try:
             response_data = response.json()
-        except ValueError:
-            # The response isn't json. First, let's attempt to raise a normal
-            # http error. If it's a 200, then we'll raise our own error.
-            response.raise_for_status()
-            raise PushServerError('Invalid server response', response)
+            if 'errors' in response_data:
+                raise PushServerError('Request failed', response, response_data=response_data,
+                                      errors=response_data['errors'])
 
-        # If there are errors with the entire request, raise an error now.
-        if 'errors' in response_data:
-            raise PushServerError('Request failed',
-                                  response,
-                                  response_data=response_data,
-                                  errors=response_data['errors'])
+            if 'data' not in response_data:
+                raise PushServerError('Invalid server response', response, response_data=response_data)
 
-        # We expect the response to have a 'data' field with the responses.
-        if 'data' not in response_data:
-            raise PushServerError('Invalid server response',
-                                  response,
-                                  response_data=response_data)
-
-        # Use the requests library's built-in exceptions for any remaining 4xx
-        # and 5xx errors.
-        response.raise_for_status()
-
-        # At this point, we know it's a 200 and the response format is correct.
-        # Now let's parse the responses per push notification.
-        response_data = response_data['data']
-        ret = []
-        for r_id, val in response_data.items():
-            ret.append(
-                PushTicket(push_message=PushMessage(),
-                           status=val.get('status', PushTicket.ERROR_STATUS),
-                           message=val.get('message', ''),
-                           details=val.get('details', None),
-                           id=r_id))
-        return ret
+            ret = []
+            for r_id, val in response_data['data'].items():
+                ret.append(
+                    PushTicket(
+                        push_message=PushMessage(),
+                        status=val.get('status', PushTicket.ERROR_STATUS),
+                        message=val.get('message', ''),
+                        details=val.get('details', None),
+                        id=r_id))
+            return ret
+        except httpx.HTTPStatusError as e:
+            raise PushServerError('HTTP error', e.request, {'error': str(e)})
+        except httpx.RequestError as e:
+            raise PushServerError('Request failed', e.request)
