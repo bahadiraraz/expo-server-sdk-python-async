@@ -16,70 +16,56 @@ Use to send push notifications to Exponent Experiences from a Python server.
 
 Here's an example on how to use this with retries and reporting via [pyrollbar](https://github.com/rollbar/pyrollbar).
 ```python
+import os
+import httpx
+from httpx import HTTPError, NetworkError
+from loguru import logger
+from dotenv import load_dotenv
 from exponent_server_sdk import (
     DeviceNotRegisteredError,
-    AsyncPushClient,  # Use the asynchronous version of the PushClient
+    AsyncPushClient,
     PushMessage,
     PushServerError,
     PushTicketError,
 )
-import os
-import httpx
-from httpx import HTTPError, NetworkError  # Correct exception handling for httpx
 
-# Optionally providing an access token within a session if you have enabled push security
-async with httpx.AsyncClient() as session:
-    session.headers.update(
-        {
-            "Authorization": f"Bearer {os.getenv('EXPO_TOKEN')}",
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-        }
-    )
+logger.add("debug.log", rotation="1 week", compression="zip")
+load_dotenv()
+logger.debug("Using Expo Token: {}", os.getenv('EXPO_TOKEN'))
 
-    # The async function for sending push messages
-    async def send_push_message(token, message, extra=None):
+
+async def send_push_message(token, message, extra=None):
+    async with httpx.AsyncClient(headers={
+        "Authorization": f"Bearer {os.getenv('EXPO_TOKEN')}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }) as session:
         try:
             response = await AsyncPushClient(session=session).publish(
-                PushMessage(to=token,
-                            body=message,
-                            data=extra))
+                PushMessage(to=token, body=message, data=extra, sound="default"))
+            response.validate_response()
         except PushServerError as exc:
-            # Encountered some likely formatting/validation error.
-            rollbar.report_exc_info(
-                extra_data={
-                    'token': token,
-                    'message': message,
-                    'extra': extra,
-                    'errors': exc.errors,
-                    'response_data': exc.response_data,
-                })
+            logger.error("Push server error: {}", exc)
             raise
         except (NetworkError, HTTPError) as exc:
-            # Encountered some Connection or HTTP error - retry a few times in
-            # case it is transient.
-            rollbar.report_exc_info(
-                extra_data={'token': token, 'message': message, 'extra': extra})
-            raise self.retry(exc=exc)
-
-        try:
-            # We got a response back, but we don't know whether it's an error yet.
-            # This call raises errors so we can handle them with normal exception
-            # flows.
-            response.validate_response()
+            logger.error("Network or HTTP error: {}", exc)
+            raise
         except DeviceNotRegisteredError:
-            # Mark the push token as inactive
-            from notifications.models import PushToken
-            await PushToken.objects.filter(token=token).update(active=False)
-        except PushTicketError as exc:
-            # Encountered some other per-notification error.
-            rollbar.report_exc_info(
-                extra_data={
-                    'token': token,
-                    'message': message,
-                    'extra': extra,
-                    'push_response': exc.push_response._asdict(),
-                })
-            raise self.retry(exc=exc)
+            logger.warning("Device not registered, deactivating token: {}", token)
 
+        except PushTicketError as exc:
+            logger.error("Push ticket error: {}", exc)
+            raise
+
+async def main():
+    token = "ExponentPushToken[TOKEN]"
+    message = "HI! This is a test message."
+    extra_parameters = {"key": "value"}
+    await send_push_message(token, message, extra_parameters)
+
+
+if __name__ == "__main__":
+    import asyncio
+
+    asyncio.run(main())
 ```
