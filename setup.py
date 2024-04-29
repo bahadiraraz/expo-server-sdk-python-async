@@ -16,14 +16,14 @@ except IOError:
 
 
 setup(
-    name='exponent_server_sdk',
+    name='exponent_server_sdk_async',
     version='2.1.0',
-    description='Expo Server SDK for Python',
+    description='Expo Server SDK for Python async',
     long_description=README,
     long_description_content_type='text/markdown',
-    url='https://github.com/expo/exponent-server-sdk-python',
-    author='Expo Team',
-    author_email='exponent.team@gmail.com',
+    url='https://github.com/bahadiraraz/expo-server-sdk-python-async',
+    author='Bahadır Araz',
+    author_email='Bahadiraraz@protonmail.com',
     license='MIT',
     install_requires=[
         'requests',

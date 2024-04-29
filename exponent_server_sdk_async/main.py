@@ -3,7 +3,7 @@ import httpx
 from httpx import HTTPError, NetworkError
 from loguru import logger
 from dotenv import load_dotenv
-from exponent_server_sdk import (
+from exponent_server_sdk_async import (
     DeviceNotRegisteredError,
     AsyncPushClient,
     PushMessage,

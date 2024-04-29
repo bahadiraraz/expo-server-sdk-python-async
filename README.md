@@ -1,27 +1,23 @@
-# exponent-server-sdk-python
+# exponent-server-sdk-python-async
 
-This repo is maintained by Expo's awesome community :heart_eyes:! So, if you have problems with the code in this repository, please feel free to open an issue, and make a PR. Thanks!
+This repo is made for the async version of the [exponent-server-sdk-python](https://github.com/expo-community/expo-server-sdk-python) made by [Bahadır Araz](https://github.com/bahadiraraz).
 
 ## Installation
 
 ```
-pip install exponent_server_sdk
+pip install exponent-server-sdk-async==2.1.3
 ```
 
 ## Usage
-
 Use to send push notifications to Exponent Experiences from a Python server.
-
 [Full documentation](https://docs.expo.dev/push-notifications/sending-notifications/#http2-api) on the API is available if you want to dive into the details.
-
-Here's an example on how to use this with retries and reporting via [pyrollbar](https://github.com/rollbar/pyrollbar).
 ```python
 import os
 import httpx
 from httpx import HTTPError, NetworkError
 from loguru import logger
 from dotenv import load_dotenv
-from exponent_server_sdk import (
+from exponent_server_sdk_async import (
     DeviceNotRegisteredError,
     AsyncPushClient,
     PushMessage,
@@ -56,6 +52,7 @@ async def send_push_message(token, message, extra=None):
         except PushTicketError as exc:
             logger.error("Push ticket error: {}", exc)
             raise
+
 
 async def main():
     token = "ExponentPushToken[TOKEN]"
